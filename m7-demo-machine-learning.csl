@@ -1,0 +1,174 @@
+//------------------------------------------------------------------------------
+// Kusto Query Language (KQL) From Scratch
+// Module 7 - Machine Learning
+//
+// The demos in this module serve as a very basic introduction to the KQL
+// language within the Azure Log Analytics environment. 
+//
+// Copyright (c) 2018. Microsoft, Pluralsight, Robert C. Cain. 
+// All rights reserved. This code may be used in part within your own
+// applications. 
+//
+// This code may NOT be redistributed in it's entirely without permission
+// of one of it's copyright holders. 
+//------------------------------------------------------------------------------
+
+//------------------------------------------------------------------------------
+// basket
+//------------------------------------------------------------------------------
+
+// basket analysis uses a method called the Apiori algorithm to attempt to
+// uncover frequency patterns in the data. The classic example is the grocery
+// basket, wanting to find the most popular combination of grocery items
+
+// Apiori works by first examining the frequency of each distinct value in
+// the list, then if an item is not frequent other combinations with that
+// item wouldn't be considered frequent either and thus are elimiated from
+// consideration. Once it has a list of attributes that are frequent,
+// it then analyzes the combination of attributes for frequency. 
+
+// Here, we will do an analysis to see which combination of computer plus
+// performance counters appears the most frequently
+Perf
+| where TimeGenerated >= ago(10d)
+| project Computer
+        , ObjectName 
+        , CounterName
+        , InstanceName  
+| evaluate basket()
+
+
+// basket has several optional parameters, the first of which is threshold.
+// The threshold determines the minimum frequency a combination must occur
+// in order to be considered for inclusion. KQL uses a ratio of 0 to 1, 
+// with the default being 0.05
+let threshold = 0.03;
+Perf
+| where TimeGenerated >= ago(10d)
+| project Computer
+        , ObjectName 
+        , CounterName
+        , InstanceName  
+| evaluate basket(threshold)
+
+// Note there are some other parameters as well, but as these are
+// not frequently used you can refer to online help for more info.
+
+
+//------------------------------------------------------------------------------
+// autocluster
+//------------------------------------------------------------------------------
+
+// autocluster looks for common patterns of discrete attributes in the data
+// and reduces it to just a small number of patterns. 
+// This is similar to the basket function except is uses a different 
+// algorithm.  
+
+Event
+| where TimeGenerated >= ago(10d)
+| project Source 
+        , EventLog 
+        , Computer 
+        , EventLevelName 
+        , RenderedDescription 
+| evaluate autocluster()        
+
+
+// Like bucket, autocluster has a weight parameter called SizeWeight. 
+// It determines the balance between high coverage (less rows but more
+// focused results) and informative (many shared values)
+// Value is in range of 0-1 with 0.5 being default
+let sizeWeight = 0.3;
+Event
+| where TimeGenerated >= ago(10d)
+| project Source 
+        , EventLog 
+        , Computer 
+        , EventLevelName 
+        , RenderedDescription 
+| evaluate autocluster(sizeWeight)
+
+
+// Again, just like bucket, autocluster has other parameters that are not
+// frequently used, so review the online help for more information.
+
+
+//------------------------------------------------------------------------------
+// diffpatterns
+//------------------------------------------------------------------------------
+
+// diffpatterns takes a dataset and splits it into two halves based on two 
+// value in a specied column. It then returns the most common set of attributes,
+// showing how many were associated with the first value (A) and how many
+// for the second value (B).
+
+// Here we're going to take a set of attributes from the Event table, and
+// split the data based on the EventLevelName column. Side A will be 
+// Error events, side B Warning events.
+
+Event
+| where TimeGenerated >= ago(5d)
+| project Source, Computer, EventID, EventCategory, EventLevelName
+| evaluate diffpatterns(EventLevelName, 'Error', 'Warning')
+
+
+// As with the other functions in this module, diffpatterns has a variety
+// of optional parameters.
+
+// The first is WeightColumn. This allows you to provide a column that
+// provides extra weight (preference) to some rows, for example you
+// may have data that already has a frequency counter in it. 
+// As this dataset lacks such a column, in the next example we'll
+// use the wildcard of ~ for this value
+
+// The second parameter is Threshold, which operates like the
+// threshold values in the other functions. The range is 0 to 1, with
+// 0.05 being the default value. 
+Event
+| where TimeGenerated >= ago(5d)
+| project Source, Computer, EventID, EventCategory, EventLevelName
+| evaluate diffpatterns(EventLevelName, 'Error', 'Warning', '~', 0.03)
+
+// see online help for the other lesser used values.
+
+
+//------------------------------------------------------------------------------
+// reduce
+//------------------------------------------------------------------------------
+
+// reduce is used to determine patterns in string data. For example, let's
+// say you have ten computers whose names all end in .ContosoRetail.com. Reduce
+// will summarize them into the pattern of *.ContosoRetail.com, give you a 
+// count of the number of occurences for this pattern, then in the 
+// Representative column show one exaple of this pattern
+
+Perf
+| where TimeGenerated >= ago(12h)
+| project Computer 
+| reduce by Computer 
+
+
+// reduce has a threshold value, although it's implemented slightly
+// different from the other functions. It should be in the range of 0 to 1,
+// the default being 0.1. For larger inputs use a small value.
+Perf
+| where TimeGenerated >= ago(12h)
+| project Computer 
+| reduce by Computer with threshold = 0.3
+
+
+// Another parameter is characters. Characters is basically a list of 
+// characters that should be ignored as "word breakers". For example, if
+// a period was passed in, ContosoRetail.com would be evaluated as 
+// ContosoRetailcom. 
+Perf
+| where TimeGenerated >= ago(12h)
+| project Computer 
+| reduce by Computer with threshold = 0.2, characters = '.'
+
+
+// If you want to take the default for threshold, you can just omit it
+Perf
+| where TimeGenerated >= ago(12h)
+| project Computer 
+| reduce by Computer with characters = '.'

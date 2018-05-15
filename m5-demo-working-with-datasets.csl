@@ -1,0 +1,835 @@
+//------------------------------------------------------------------------------
+// Kusto Query Language (KQL) From Scratch
+// Module 5 - Working With Datasets
+//
+// The demos in this module serve as a very basic introduction to the KQL
+// language within the Azure Log Analytics environment. 
+//
+// Copyright (c) 2018. Microsoft, Pluralsight, Robert C. Cain. 
+// All rights reserved. This code may be used in part within your own
+// applications. 
+//
+// This code may NOT be redistributed in it's entirely without permission
+// of one of it's copyright holders. 
+//------------------------------------------------------------------------------
+
+
+//------------------------------------------------------------------------------
+// let
+//------------------------------------------------------------------------------
+
+// let has many uses. First, it can be used to represent a constant value
+let minCounterValue = 300;
+let counterName = "Free Megabytes";
+Perf
+| project Computer 
+        , TimeGenerated 
+        , CounterName 
+        , CounterValue 
+| where CounterName == counterName
+    and CounterValue <= minCounterValue
+
+
+// This has advantages when the constant is used multiple times in a query,
+// making it easier to operationalize your query.
+let compName = "ContosoSQLSrv1";
+Perf
+| where Computer == compName
+| extend ThisIsFor = strcat( "This data is for computer ", compName)
+| project ThisIsFor 
+        , TimeGenerated 
+        , CounterName 
+        , CounterValue 
+
+
+// Next, let can be used to hold calculated values
+let startDate = ago(12h);
+Perf 
+| project Computer 
+        , TimeGenerated 
+        , CounterName 
+        , CounterValue 
+| where TimeGenerated >= startDate
+
+
+// let can hold datasets, to make things like union more readable
+// (More on unions in a bit...)
+let compName = "ContosoSQLSrv1";
+let UpdtSum = UpdateSummary
+  | where Computer == compName
+  | project Computer
+          , ComputerEnvironment
+          , ManagementGroupName
+          , OsVersion
+          , Resource
+          , ResourceGroup
+          , SourceSystem
+          , Type
+          , NETRuntimeVersion;
+let Updt = Update
+  | where Computer == compName
+  | project Computer
+          , ComputerEnvironment
+          , ManagementGroupName
+          , OSVersion
+          , Resource
+          , ResourceGroup
+          , SourceSystem
+          , Type
+          , Title
+          , UpdateState;
+union withsource = "SourceTable" 
+      UpdtSum
+    , Updt
+
+
+// Finally, let can hold a function
+let dateDiffInDays = (date1: datetime, date2: datetime = datetime(2018-01-01))
+                     { (date1 - date2) / 1d }
+;
+print dateDiffInDays(now(), todatetime("2018-02-01"))
+
+// Similar to most languages, after declaring the name the ( ) contains the
+// parameters. Here we have two datetime values. The first is mandatory, 
+// the function will fail without it. The second is optional, if no value
+// is passed in it will use the value after the =, in this case 
+// datetime(2018-01-01)
+
+// Next are { } which house the actual function itself. Here we subtract the
+// date2 value from date1 and divide by 1d to get a value back in days
+
+// Here is an example where we take the default for date2
+let dateDiffInDays = (date1: datetime, date2: datetime = datetime(2018-01-01))            
+                     { (date1 - date2) / 1d }
+;
+print dateDiffInDays(now())
+
+
+//------------------------------------------------------------------------------
+// join
+//------------------------------------------------------------------------------
+
+// joins two tabels together when they have a common column name
+Perf
+| take 1000
+| join (Alert) on Computer
+
+
+// When they don't have a common column you can still join them
+Perf
+| take 1000
+| join (Alert) on $left.Computer == $right.Computer
+
+
+// joins can get fairly complex if you need them to. 
+// (Note the default is to do an innerunique join, see notes 
+//  below for more on the kinds of joins.)
+Perf
+| where CounterName == "% Processor Time"
+| project Computer 
+        , CounterName 
+        , CounterValue 
+        , PerfTime=TimeGenerated 
+| join ( Alert        
+       | project Computer 
+               , AlertName 
+               , AlertDescription 
+               , ThresholdOperator 
+               , ThresholdValue 
+               , AlertTime=TimeGenerated 
+       | where AlertName == "High CPU Alert" 
+       )
+    on Computer
+
+
+// join supports many types:
+// fullouter, inner, innerunique, leftanti, leftantisemi,
+// leftouter, leftsemi, rightanti, rightantisemi, rightouter, rightsemi
+// The default is an innerunique join
+// Use the kind hint to indicate what type of join to use
+Perf
+| where CounterName == "% Processor Time"
+| project Computer 
+        , CounterName 
+        , CounterValue 
+        , PerfTime=TimeGenerated 
+| join kind=fullouter 
+       ( Alert        
+       | project Computer 
+               , AlertName 
+               , AlertDescription 
+               , ThresholdOperator 
+               , ThresholdValue 
+               , AlertTime=TimeGenerated 
+       | where AlertName == "High CPU Alert" 
+       )
+    on Computer 
+
+// join kind quick reference
+
+// innerunique
+//   Only one row from the left is matched for each value of the on key. 
+//   Output contains a match for each row on the right with a row on the left
+//   NOTE: This is the default. If you are coming from a SQL background, 
+//   you might expect the behavior to be inner, so be careful to look over
+//   your results. If you wanted an inner joing you will need to
+//   explictly specify kind=inner when you execute the query!
+
+// inner
+//   Output has one row for every combination of left and rigth
+
+// leftouter
+//   In addition to every match, there's a row for every row on the left
+//   even if there's no match on the right
+
+// rightouter / fullouter
+//   Same as left outer, but either includes all right rows, or all rows,
+//   regardless of matches.
+
+// leftanti / rightanti
+//   The reverse of outer joins, only returns rows who do NOT have a match
+//   on the right (or left depending on which was used)
+
+// leftsemi / rightsemi
+//   Returns rows who have a match on both sides, but only includes the 
+//   columns from the left side (or right if rightsemi was used)
+
+
+// In this example, we'll use our friend the let statement to create
+// two datasets. The first will be a list of computers, with their 
+// Percent CPU averaged by the hour of the day. 
+// In the second dataset, we'll do the same thing except we'll 
+// average the available hard disk space. 
+// The join will allow us to connect these datasets by the common
+// columns of time and computer, displaying the two metrics we are
+// interested in. 
+let startTime = ago(1d);
+let endTime = now();
+let ProcData = (
+    Perf 
+    | where TimeGenerated between (startTime .. endTime)
+    | where CounterName == "% Processor Time"
+    | where ObjectName == "Processor"
+    | where InstanceName == "_Total"
+    | summarize PctCpuTime = avg(CounterValue) 
+            by Computer, bin(TimeGenerated, 1h)
+);
+let MemData = (
+    Perf 
+    | where TimeGenerated between (startTime .. endTime)
+    | where CounterName == "Available MBytes"
+    | summarize AvailableMB = avg(CounterValue) 
+            by Computer, bin(TimeGenerated, 1h)
+);
+ProcData
+| join kind= inner (
+   MemData 
+) on Computer, TimeGenerated
+| project TimeGenerated, Computer, PctCpuTime, AvailableMB
+| sort by TimeGenerated desc, Computer asc
+
+
+//------------------------------------------------------------------------------
+// union
+//------------------------------------------------------------------------------
+
+// Creates an output dataset that is the combination of two tables
+UpdateSummary
+| union Update
+
+
+// An optional parameter lets you add a column (here it was named SourceTable)
+// to indicate which table the data came from.
+UpdateSummary
+| union withsource="SourceTable" Update
+
+// Here is a version where we project specific columns. To do so, we
+// needed to wrap the calls inside ( )
+( UpdateSummary
+| project Computer
+        , ComputerEnvironment
+        , ManagementGroupName
+        , OsVersion
+        , Resource
+        , ResourceGroup
+        , SourceSystem
+        , Type
+        , NETRuntimeVersion
+)
+| union withsource = "SourceTable"
+        ( Update
+        | project Computer
+        , ComputerEnvironment
+        , ManagementGroupName
+        , OSVersion
+        , Resource
+        , ResourceGroup
+        , SourceSystem
+        , Type
+        , Title
+        , UpdateState
+        )
+
+
+// You can also call union by using the union keyword first, then
+// listing the tables to union
+union withsource = "SourceTable"
+  ( UpdateSummary
+  | project Computer
+          , ComputerEnvironment
+          , ManagementGroupName
+          , OsVersion
+          , Resource
+          , ResourceGroup
+          , SourceSystem
+          , Type
+          , NETRuntimeVersion
+  )
+, ( Update
+  | project Computer
+          , ComputerEnvironment
+          , ManagementGroupName
+          , OSVersion
+          , Resource
+          , ResourceGroup
+          , SourceSystem
+          , Type
+          , Title
+          , UpdateState
+  )
+
+
+// You can union an unlimited number of tables, the more you do though
+// the longer the query takes to run
+union withsource = "SourceTable"
+  ( UpdateSummary
+  | project Computer
+          , ComputerEnvironment
+          , ManagementGroupName
+          , OsVersion
+          , Resource
+          , ResourceGroup
+          , SourceSystem
+          , Type
+          , NETRuntimeVersion
+  )
+, ( Update
+  | project Computer
+          , ComputerEnvironment
+          , ManagementGroupName
+          , OSVersion
+          , Resource
+          , ResourceGroup
+          , SourceSystem
+          , Type
+          , Title
+          , UpdateState
+  )
+, ( Perf
+  | project Computer
+          , CounterName
+          , CounterValue
+  )
+
+
+// In practice though, using the let statement generally makes unions
+// much easier to read and work with. Here is the example from 
+// earlier, where we assign the datasets to lets and then do the 
+// union.
+let compName = "ContosoSQLSrv1";
+let UpdtSum = UpdateSummary
+  | where Computer == compName
+  | project Computer
+          , ComputerEnvironment
+          , ManagementGroupName
+          , OsVersion
+          , Resource
+          , ResourceGroup
+          , SourceSystem
+          , Type
+          , NETRuntimeVersion;
+let Updt = Update
+  | where Computer == compName
+  | project Computer
+          , ComputerEnvironment
+          , ManagementGroupName
+          , OSVersion
+          , Resource
+          , ResourceGroup
+          , SourceSystem
+          , Type
+          , Title
+          , UpdateState;
+union withsource = "SourceTable" 
+      UpdtSum
+    , Updt
+
+
+// Union has a modifier: kind=inner and kind=outer
+// inner (the default) returns all columns common to all input tables
+// outer returns all columns, setting empty columns to a null
+union kind=outer withsource="SourceTable"
+  UpdateSummary
+, Update
+
+// Union also has an option to use fuzzy resolution. Fuzzy
+// means execution continues even if an underlying table 
+// is no longer present. A warning will appear. 
+// (by default fuzzy is off).
+union withsource="SourceTable" isfuzzy = true
+  UpdateSummary
+, Update
+
+// The table ArcaneCode clearly won't exist, yet the query will still
+// work with fuzzy on. Note that if you call this via an API, you get a
+// warning, but the user interface will not provide any warning!
+union withsource="SourceTable" isfuzzy = true
+  UpdateSummary
+, ArcaneCode
+
+// We can further extend the result of the union by adding columns
+// via extend. Here we combine the union with the function we 
+// created earlier in the let demo.
+let compName = "ContosoSQLSrv1";
+let UpdtSum = UpdateSummary
+  | where Computer == compName
+  | project Computer
+          , ComputerEnvironment
+          , ManagementGroupName
+          , OsVersion
+          , Resource
+          , ResourceGroup
+          , SourceSystem
+          , Type
+          , NETRuntimeVersion
+          , TimeGenerated ;
+let Updt = Update
+  | where Computer == compName
+  | project Computer
+          , ComputerEnvironment
+          , ManagementGroupName
+          , OSVersion
+          , Resource
+          , ResourceGroup
+          , SourceSystem
+          , Type
+          , Title
+          , UpdateState
+          , TimeGenerated ;
+let dateDiffInDays = (date1: datetime, date2: datetime = datetime(2018-01-01))
+                     { (date1 - date2) / 1d };
+union withsource = "SourceTable"
+      UpdtSum
+    , Updt
+| extend DaysSinceStartOfYear=dateDiffInDays(TimeGenerated)
+
+//------------------------------------------------------------------------------
+// datatable
+//------------------------------------------------------------------------------
+
+// Generates a datatable that is defined in the code itself
+datatable (ID:int, TimeGenerated:datetime, YouTubeName:string, YouTubeURL:string)
+[ 1, datetime(2018-04-01), 'AnnaKatMeow', 'https://www.youtube.com/channel/UCmErtDPkJe3cjPPhOw6wPGw'
+, 2, datetime(2018-04-02), 'AdultsOnlyMinecraft', 'https://www.youtube.com/user/AdultsOnlyMinecraft'
+, 3, datetime(2018-04-03), 'Arcane Training and Consulting', 'https://www.youtube.com/channel/UCTH58i-Gl1bZeATOeC4f25g'
+, 4, datetime(2018-04-04), 'Arcane Tube', 'https://www.youtube.com/channel/UCkR0kwYjQ_gngZ8jE3ki7xw'
+, 5, datetime(2018-04-05), 'PowerShell Virtual Chapter', 'https://www.youtube.com/channel/UCFX97evt_7Akx_R9ovfiSwQ'
+]
+
+
+// Can be useful with a let
+let FavoriteYouTubers = datatable ( ID:int
+                                  , TimeGenerated:datetime
+                                  , YouTubeName:string
+                                  , YouTubeURL:string
+                                  )
+[   1
+  , datetime(2018-04-01)
+  , 'AnnaKatMeow'
+  , 'https://www.youtube.com/channel/UCmErtDPkJe3cjPPhOw6wPGw'
+,   2
+  , datetime(2018-04-02)
+  , 'AdultsOnlyMinecraft'
+  , 'https://www.youtube.com/user/AdultsOnlyMinecraft'
+,   3
+  , datetime(2018-04-03)
+  , 'Arcane Training and Consulting'
+  , 'https://www.youtube.com/channel/UCTH58i-Gl1bZeATOeC4f25g'
+,   4
+  , datetime(2018-04-04)
+  , 'Arcane Tube'
+  , 'https://www.youtube.com/channel/UCkR0kwYjQ_gngZ8jE3ki7xw'
+,   5
+  , datetime(2018-04-05)
+  , 'PowerShell Virtual Chapter'
+  , 'https://www.youtube.com/channel/UCFX97evt_7Akx_R9ovfiSwQ'
+];
+FavoriteYouTubers 
+| project YouTubeName
+        , YouTubeURL
+
+
+// A more pratical example
+let computers = datatable ( Computer:string )
+[
+  "ContosoSQLSrv1"
+, "ContosoWeb"
+, "ContosoWeb0-Linux"
+, "ContosoWeb1.ContosoRetail.com"
+, "ContosoWeb2-Linux"
+];
+let PerfInfo = Perf 
+| project Computer 
+        , TimeGenerated 
+        , CounterName 
+        , CounterValue ;
+computers 
+| join PerfInfo on Computer
+
+
+//------------------------------------------------------------------------------
+// prev / next
+//------------------------------------------------------------------------------
+
+// prev gets the value from a column in previous row
+// Must use serialize operator in order to enable prev/next functionality
+let SomeData = datatable ( rowNum:int, rowVal:string )
+[
+  1, "Value 01"
+, 2, "Value 02"
+, 3, "Value 03"
+, 4, "Value 04"
+, 5, "Value 05"
+, 6, "Value 06"
+, 7, "Value 07"
+, 8, "Value 08"
+, 9, "Value 09"
+];
+SomeData 
+| serialize 
+| extend prvVal = strcat("Previous Value was ", prev(rowVal))
+
+
+// next
+let SomeData = datatable ( rowNum:int, rowVal:string )
+[
+  1, "Value 01"
+, 2, "Value 02"
+, 3, "Value 03"
+, 4, "Value 04"
+, 5, "Value 05"
+, 6, "Value 06"
+, 7, "Value 07"
+, 8, "Value 08"
+, 9, "Value 09"
+];
+SomeData 
+| serialize 
+| extend nxtVal = strcat("Next Value is ", next(rowVal))
+
+
+// You can use an offset to go back or forward more than 1
+let SomeData = datatable ( rowNum:int, rowVal:string )
+[
+  1, "Value 01"
+, 2, "Value 02"
+, 3, "Value 03"
+, 4, "Value 04"
+, 5, "Value 05"
+, 6, "Value 06"
+, 7, "Value 07"
+, 8, "Value 08"
+, 9, "Value 09"
+];
+SomeData 
+| serialize 
+| extend prvVal2 = prev(rowVal, 2)
+| extend prvVal = strcat("Previous Value back 2 was ", prvVal2)
+
+
+// If you use the offset, you can add a third parameter to use as 
+// a default when there is no prev or next row
+let SomeData = datatable ( rowNum:int, rowVal:string )
+[
+  1, "Value 01"
+, 2, "Value 02"
+, 3, "Value 03"
+, 4, "Value 04"
+, 5, "Value 05"
+, 6, "Value 06"
+, 7, "Value 07"
+, 8, "Value 08"
+, 9, "Value 09"
+];
+SomeData 
+| serialize 
+| extend prvVal = prev(rowVal, 1, "not valid for this row")
+| extend prvVal = strcat("Previous Value was ", prvVal)
+
+
+// iif is a useful function for testing and setting defaults on the
+// boundaries. Also note you can use prev/next in calculations, as 
+// well as mix them
+let SomeData = datatable ( rowNum:int, rowVal:string )
+[
+  1, "Value 01"
+, 2, "Value 02"
+, 3, "Value 03"
+, 4, "Value 04"
+, 5, "Value 05"
+, 6, "Value 06"
+, 7, "Value 07"
+, 8, "Value 08"
+, 9, "Value 09"
+];
+SomeData 
+| serialize 
+| extend prvVal = prev(rowVal)
+       , nxtNum = next(rowNum, 1, 0)     // back one row, 0 is default
+| extend displayPrvVal = iif( isempty(prvVal)==true
+                            , "There was no prevoius value."
+                            , strcat("The previous Value was ", prvVal)
+                            )
+       , displayNxtNum = nxtNum * 100
+
+
+// So far we used prev/next on datasets that were hard coded, and thus the
+// order is predictable. This makes the examples easy to understand. However,
+// when working with real data it will be important to sort your data in
+// order for prev/next to work correctly. 
+
+// By now the first part of the query should be obvious. For the computer 
+// ContosoWeb we get the processor times for the last 24 hours. 
+// They are then averaged by the hour and put into the PctCpuTime variable.
+
+// Next is the important step, sorting the results by the time of day.
+
+// After this we then get the current percent cpu time, then use the
+// prev function to get the previous cpu time, using 0 as a default 
+// (prev(PctCpuTime, 1, 0) ). The cpu time from two rows back is obtained,
+// again using 0 as a default ( prev(PctCpuTime, 2, 0) )
+
+// Finally the three are added, then divided by 3 to give a moving average,
+// which is then added to the output in the movAvg variable.
+
+let startTime = ago(1d);
+let endTime = now();
+Perf 
+| where TimeGenerated between (startTime .. endTime)
+| where Computer == "ContosoWeb"
+| where CounterName == "% Processor Time"
+| where ObjectName == "Processor"
+| where InstanceName == "_Total"
+| summarize PctCpuTime = avg(CounterValue) by bin(TimeGenerated, 1h)
+| sort by TimeGenerated asc //serialize is implied in any sort operation
+| extend movAvg= (PctCpuTime + prev(PctCpuTime, 1, 0) + prev(PctCpuTime, 2, 0))/3.0
+
+
+// A picture is worth a thousand words, so KQL has an output option to
+// render a graph over time. IT looks for a datetime variable, then 
+// plots all numeric variables across the chart
+let startTime = ago(1d);
+let endTime = now();
+Perf 
+| where TimeGenerated between (startTime .. endTime)
+| where Computer == "ContosoWeb"
+| where CounterName == "% Processor Time"
+| where ObjectName == "Processor"
+| where InstanceName == "_Total"
+| summarize PctCpuTime = avg(CounterValue) by bin(TimeGenerated, 1h)
+| sort by TimeGenerated asc //serialize is implied in any sort operation
+| extend movAvg= (PctCpuTime + prev(PctCpuTime, 1, 0) + prev(PctCpuTime, 2, 0))/3.0
+| render timechart 
+
+
+//------------------------------------------------------------------------------
+// toscalar
+//------------------------------------------------------------------------------
+
+// scalar values are ones that occupy a single cell in a table. This includes
+// not just numbers and strings, but also includes things like arrays 
+// and objects
+
+// Simple example, calculate a constant value 
+// (speed of light in miles per second)
+let speedOfLight = toscalar(186 * 1000);
+print speedOfLight
+
+
+// A more common example is to get an array out of a query. Here, we
+// first get a list of all computers that had a low amount of disk 
+// space reported and store it in a scalar value (an array).
+// We then use that to limit the results of the next query, where we 
+// are asking to see all counters for those computers that reported a
+// low disk space condition. 
+let myComputerList = toscalar( Perf
+                             | where CounterName == "Free Megabytes"
+                                 and CounterValue < 1000
+                                 and TimeGenerated >= ago(1h)
+                             | summarize makeset(Computer)
+                             );
+Perf
+| where TimeGenerated >= ago(1h)
+    and Computer in (myComputerList)
+| project Computer 
+        , TimeGenerated 
+        , CounterName 
+        , CounterValue 
+| sort by Computer asc  
+        , TimeGenerated desc
+        , CounterName asc
+
+
+// It should be stressed toscalar returns a single value, not an entire
+// dataset.
+
+
+//------------------------------------------------------------------------------
+// row_cumsum
+//------------------------------------------------------------------------------
+
+// row_cumsum provides a way to do a cumulative summary for values in a 
+// data set. In this simple example, for each row it adds a column 
+// (cumulativeSum) adding up the value in column a up to that row
+datatable (a:long) 
+[
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10
+]
+| serialize cumulativeSum=row_cumsum(a)
+
+
+// In this example, we will add up the amount of bytes received over the
+// last few hours
+let fromTime = ago(3h);
+let thruTime = now();
+Perf
+| where TimeGenerated between (fromTime .. thruTime)
+| where ObjectName == "Network Adapter"
+| where CounterName == "Bytes Received/sec" 
+| summarize BytesRecPerHour = sum(CounterValue) 
+         by Computer, bin(TimeGenerated, 1h)
+| sort by Computer asc, TimeGenerated asc
+| serialize BytesRecToCurrentHour = row_cumsum(BytesRecPerHour)
+
+
+// row_cumsum has a second parameter, reset. Reset takes a true/false
+// value that tells it whether to reset the value being summed to 0. 
+// Here we create a variable, temp. Then use it as a row number for
+// each computer, resetting the value when the computer name changes
+// (also providing another useful example for the use of prev)
+let fromTime = ago(3h);
+let thruTime = now();
+Perf 
+| where TimeGenerated between (fromTime .. thruTime)
+| where CounterName == "% Processor Time"
+| where ObjectName == "Processor"
+| where InstanceName == "_Total"
+| summarize PctCpuTime = avg(CounterValue) 
+         by Computer, bin(TimeGenerated, 1h)
+| sort by Computer asc, TimeGenerated asc
+| extend temp = 1
+| extend rowNum_partitioned = row_cumsum(temp, Computer != prev(Computer))
+| project-away temp 
+
+
+//------------------------------------------------------------------------------
+// materialize
+//------------------------------------------------------------------------------
+
+// materialze will take the results of a query and cache them in memory.
+// This means the query is only run once, as opposed to multiple times.
+
+// Here, we want to generate a report. For all of the computers that generated
+// an event in the last hour, what percentage of all the errors reported was
+// that computer responsible for, and what percentage of all the warnings 
+// reported was that computer responsible for.
+
+// We start by caching all of the events generated in the last hour into
+// the myEvents variable.
+
+// Next, we get a count of all the errors in that cached dataset (errorCount)
+
+// Likewise we get a count of all the warnings in the cached dataset 
+// (warningCount)
+
+// Then, for that cached dataset we add a column (eventCount) that
+// contains a count of the number of rows for that EventLevelName
+
+// We next do a pivot. We want our final output to be in the form of
+// Computer ErrorPercent WarningPercent
+// Using a pivot will take what had been rows of computer, event level, 
+// and count and comvert the event level counters into columns 
+
+// Next, we calculate the ratio for the warnings by dividing it's eventCount 
+// by the total events for that EventLevelName (warningCount).
+
+// The error ratio is calculated in the same manner, within the same extend 
+
+// We have to convert the Warning and Error counters to a double, otherwise 
+// (like with most languages) when KQL does the division it will try to come
+// up with an intenger result, since these values were integers. If that were
+// to happen the raw ratios would wind up being a 0 or a 1, not something we want. 
+// It is next multiplied by 100 to convert to a percent.
+
+// For display purposes, we only want two decimal places, so the entire 
+// calculation is wrapped in a round function to limit it to just the desired
+// two decimal places. 
+
+// Next, we will sort the data, first by the highest percent of errors then
+// by the computer name. We will be using the raw numeric value (errorRatioRaw)
+// to do the sort to avoid any issues with string sorting. 
+// We want the computer with the highest % of errors to be at the top of the list.
+// For when multiple machines have the same % of errors, we then subsort by 
+// % of warnings, then finally computer name. 
+
+// After we sort, we want to display it with the % symbol, so use strcat to
+// convert the calculated values to a string and add the % on the end. 
+
+// After that we can project just the columns we want displayed, removing the 
+// raw, intermediate calculated values 
+
+let myEvents = materialize( Event 
+                          | where TimeGenerated >= ago(1h)
+                          | project Source
+                                  , Computer
+                                  , TimeGenerated
+                                  , EventLevelName
+                          );
+let errorCount = toscalar( myEvents 
+                         | where EventLevelName == "Error" 
+                         | count  
+                         );
+let warningCount = toscalar( myEvents 
+                           | where EventLevelName == "Warning" 
+                           | count  
+                           );
+myEvents 
+| summarize eventCount = count() by Computer, EventLevelName
+| evaluate pivot(EventLevelName, sum(eventCount))
+| extend warningRatioRaw = round(  (todouble(Warning) / warningCount)  * 100
+                                , 2
+                                )
+       , errorRatioRaw = round( (todouble(Error) / errorCount)  * 100
+                              , 2
+                              )
+| sort by errorRatioRaw desc 
+        , warningRatioRaw
+        , Computer
+| extend WarningPercentage = strcat(warningRatioRaw, "%")
+       , ErrorPercentage = strcat(errorRatioRaw, "%")
+| project Computer 
+        , ErrorPercentage 
+        , WarningPercentage 
+
+
+// In addition to caching, which adds speed, materialize had another benefit,
+// in that it removes math errors due to additional rows being added during
+// the query execution.
+
+// If, for example, we calculate the errorCount, then between that calculation
+// and the reading of rows a lot of new errors were reported, the 
+// summarize might now have more or less rows then were present when the 
+// errorCount was calculated. This could produce subtle, incorrect
+// results. 
+
+

@@ -1,0 +1,42 @@
+//------------------------------------------------------------------------------
+// Kusto Query Language (KQL) From Scratch
+// Module 8 - Exporting Data
+//
+// The demos in this module serve as a very basic introduction to the KQL
+// language within the Azure Log Analytics environment. 
+//
+// Copyright (c) 2018. Microsoft, Pluralsight, Robert C. Cain. 
+// All rights reserved. This code may be used in part within your own
+// applications. 
+//
+// This code may NOT be redistributed in it's entirely without permission
+// of one of it's copyright holders. 
+//------------------------------------------------------------------------------
+
+
+// The query below isn't horribly important, it's purpose is to bring back 
+// data we can then export. 
+
+// To export to a CSV, simply select the Export To menu above (all the way
+// to the right of the Run toolbar) and pick Export To CSV - All Columns,
+// or Export To CSV - Displayed Columns. 
+
+// In this query it won't make a difference, but if you were just querying
+// an entire display, KQL shows a subset of the most common columns and hides
+// the remaining ones. 
+
+// For this demo select Export To CSV - All Columns, then your browser will
+// prompt you to save the file.  
+
+// To export to PowerBI, use the same Export menu, and pick the PowerBI option.
+// It will actually create a TXT file, with instructions in it. 
+// It will instruct you to open PowerBI, then use the 
+// 'Get Data' -> 'Blank Query' -> 'Advanced Query Editor' menu choices.
+// From there, paste in the M query found in the text file.
+
+Perf 
+| where TimeGenerated >= ago(10d)
+| where CounterName in ('Free Megabytes', '% Processor Time', 'Kerberos Authentications')
+| extend DateGenerated = startofday(TimeGenerated) 
+| summarize Occurences = count() by DateGenerated, Computer, CounterName
+| project DateGenerated, Computer, CounterName, Occurences 

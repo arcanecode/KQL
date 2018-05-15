@@ -1,0 +1,40 @@
+//------------------------------------------------------------------------------
+// Kusto Query Language (KQL) From Scratch
+// Module 1 - Introduction
+//
+// The demos in this module serve as a very basic introduction to the KQL
+// language within the Azure Log Analytics environment. 
+//
+// Copyright (c) 2018. Microsoft, Pluralsight, Robert C. Cain. 
+// All rights reserved. This code may be used in part within your own
+// applications. 
+//
+// This code may NOT be redistributed in it's entirely without permission
+// of one of it's copyright holders. 
+//------------------------------------------------------------------------------
+
+// This is a comment
+
+//------------------------------------------------------------------------------
+// Use the left/right arrow on the left of this window, at the top to expand
+// the schema pane.
+//
+// In the ACTIVE area, is Demo. While not an exact analogy it is similar 
+// to a database server. 
+//
+// Under it are Table Groups. Table groups are kind of like databases, but
+// more accurately would be a way to collect a group of tables together.
+// Unlike a database, a table can be in more than one table group.
+//
+// Each table exposes a list of columns containing the actual data. 
+//------------------------------------------------------------------------------
+
+// To retrieve data, you can simply enter the table name and hit the
+// Run button at the top, or use SHIFT+ENTER 
+// Be warned just a table name has the potential to return a lot of data, so
+// be patient if you execute this kind of query. 
+Perf 
+
+// In module 2, we'll see how to start filtering the returned data
+
+                   

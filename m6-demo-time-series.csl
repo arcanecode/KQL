@@ -1,0 +1,534 @@
+//------------------------------------------------------------------------------
+// Kusto Query Language (KQL) From Scratch
+// Module 6 - Time Series
+//
+// The demos in this module serve as a very basic introduction to the KQL
+// language within the Azure Log Analytics environment. 
+//
+// Copyright (c) 2018. Microsoft, Pluralsight, Robert C. Cain. 
+// All rights reserved. This code may be used in part within your own
+// applications. 
+//
+// This code may NOT be redistributed in it's entirely without permission
+// of one of it's copyright holders. 
+//------------------------------------------------------------------------------
+
+//------------------------------------------------------------------------------
+// range
+//------------------------------------------------------------------------------
+
+// Produces a table in steps using the boundaries indicated, incrementing by 
+// the value in the step parameter
+range myNumbers from 1 to 8 step 1
+
+range myNumbers from 1 to 8 step 2
+
+// Works great with dates
+range LastWeek from ago(7d) to now() step 1d
+
+range LastWeek from ago(24h) to now() step 1h
+
+
+// Use with start of day to get the beginning of the day
+range LastWeek from ago(7d) to now() step 1d
+| project BeginningOfDay = startofday(LastWeek)
+
+
+// Here, we'll create a table from a range, one for each day, for the
+// start of the day. Then we'll join that to a query getting the 
+// number of events bucketed by date
+// We'll then add a column that nicely formats the date 
+// It then sorts the results and displays them
+range LastWeek from ago(7d) to now() step 1d
+| project TimeGenerated = startofday(LastWeek)
+| join kind=fullouter ( Event 
+                      | where TimeGenerated > ago(7d)
+                      | summarize Count = count() 
+                               by bin(TimeGenerated, 1d)
+) on TimeGenerated
+| extend TimeDisplay = format_datetime(TimeGenerated, "yyyy-MM-dd") 
+| sort by TimeGenerated desc
+| project TimeDisplay 
+        , Count 
+
+//------------------------------------------------------------------------------
+// make-series
+//------------------------------------------------------------------------------
+
+// Takes a series of values and converts them to an array of values within a
+// column
+Perf
+| where TimeGenerated > ago(1d)
+| where CounterName  == "Available MBytes"
+| make-series avg(CounterValue) default=0 
+           on TimeGenerated in range(ago(3d), now(), 1h) by Computer 
+
+
+// We can use make series to generate an array of averages and times, then
+// use mvexpand to pivot them back to rows
+let startTime=ago(2hour);
+let endTime=now();
+Perf 
+| where TimeGenerated between (startTime .. endTime)
+| where CounterName == "% Processor Time" 
+    and Computer == "ContosoWeb1.ContosoRetail.com" 
+    and ObjectName == "Process" 
+    and InstanceName !in ("_Total", "Idle") 
+| make-series avg(CounterValue) default=0 
+           on TimeGenerated in range(startTime, endTime, 10m) 
+           by InstanceName
+| mvexpand TimeGenerated to typeof(datetime)
+         , avg_CounterValue to typeof(double) 
+           limit 100000
+
+
+// This query can then be used to render a chart over time
+let startTime=ago(2hour);
+let endTime=now();
+Perf 
+| where TimeGenerated between (startTime .. endTime)
+| where CounterName == "% Processor Time" 
+    and Computer == "ContosoWeb1.ContosoRetail.com" 
+    and ObjectName == "Process" 
+    and InstanceName !in ("_Total", "Idle") 
+| make-series avg(CounterValue) default=0 
+           on TimeGenerated in range(startTime, endTime, 10m) 
+           by InstanceName
+| mvexpand TimeGenerated to typeof(datetime)
+         , avg_CounterValue to typeof(double) 
+           limit 100000
+| render timechart
+
+// Even better, render has the ability to handle expanding on it's own,
+// so the mvexpand step can be eliminated
+let startTime=ago(2hour);
+let endTime=now();
+Perf 
+| where TimeGenerated between (startTime .. endTime)
+| where CounterName == "% Processor Time" 
+    and Computer == "ContosoWeb1.ContosoRetail.com" 
+    and ObjectName == "Process" 
+    and InstanceName !in ("_Total", "Idle") 
+| make-series avg(CounterValue) default=0 
+           on TimeGenerated in range(startTime, endTime, 10m) 
+           by InstanceName
+| render timechart
+
+// Most often used to get get statistics on that data, which we'll see next!
+
+
+//------------------------------------------------------------------------------
+// series_stats
+//------------------------------------------------------------------------------
+
+// Takes a dynamic series of values and produces a list of all the statistical
+// functions for them in one output
+let x=dynamic([23,46,23,87,4,8,3,75,2,56,13,75,32,16,29]);
+print series_stats(x)
+
+// A variant is series_stats_dynamic, which returns a dynamic column with the
+// data in json format
+let x=dynamic([23,46,23,87,4,8,3,75,2,56,13,75,32,16,29]);
+print series_stats_dynamic(x)
+
+
+// series_stats_dynamic is used in conjuction with make-series to
+// return statistics for a value
+Perf
+| where TimeGenerated > ago(1d)
+| where CounterName == "Available MBytes"
+| make-series avg(CounterValue) default=0 
+           on TimeGenerated in range(ago(1d), now(), 1h) 
+           by Computer
+| extend mySeriesStats = series_stats_dynamic(avg_CounterValue) 
+
+// Make it easier to read by projecting the individual values from the
+// dyamic value
+Perf
+| where TimeGenerated > ago(1d)
+| where CounterName == "Available MBytes"
+| make-series avg(CounterValue) default=0 
+           on TimeGenerated in range(ago(1d), now(), 1h) 
+           by Computer
+| extend mySeriesStats = series_stats_dynamic(avg_CounterValue) 
+| project Computer
+        , mySeriesStats.min
+        , mySeriesStats.min_idx
+        , mySeriesStats.max
+        , mySeriesStats.max_idx
+        , mySeriesStats.avg
+        , mySeriesStats.stdev
+        , mySeriesStats.variance
+
+
+//------------------------------------------------------------------------------
+// series_outliers
+//------------------------------------------------------------------------------
+
+// For each element in the array that is passed in, series outliers generates
+// a corresponding value that indicates the possiblity of an anomoly.
+// A value greater than 1.5, or less than -1.5, indicates the rise or 
+// decline of an anomoly. 
+
+
+// Here, we'll use series-outliers to get accounts that suddenly log on 
+// to more distinct machines than usual and perform admin detection
+
+// The ultimate query has a lot of parts, so lets break it into small
+// parts first. This is a common development scenerio, create the parts
+// of the query first so you can test those components then combine
+// them together
+
+// Start by getting base data. For user login events, get the number
+// of users that logged in (dcount will distinctly count the users)
+let fromDate = ago(5d);
+let thruDate = now();
+let baseData = materialize(
+    SecurityEvent
+      // 4624 - An account was successfully logged on.
+    | where EventID == 4624  
+      // Only for user logins
+    | where AccountType == "User"
+      // Get a list of distinct logins by account and put them
+      // in an array variable
+    | make-series dcount(Computer) default=0 
+               on TimeGenerated in range(fromDate, thruDate, 1d) 
+               by Account 
+);
+baseData
+
+// Now we'll get a list of outliers - accounts with logins that exceeded
+// the normal login rates for that account
+let fromDate = ago(5d);
+let thruDate = now();
+let baseData = materialize(
+    SecurityEvent
+    | where EventID == 4624  
+    | where AccountType == "User"
+    | make-series dcount(Computer) default=0 
+               on TimeGenerated in range(fromDate, thruDate, 1d) 
+               by Account 
+);
+// Get the top 25 ranked by outlier
+let AnomAccounts = (
+    baseData
+      // Calculate the outliers into an array
+    | extend outliers = series_outliers(dcount_Computer) 
+      // Now convert the array into rows
+    | mvexpand dcount_Computer, TimeGenerated, outliers to typeof(double)
+      // Get just the top 25 ranked by outlier
+    | top 25 by outliers desc
+    // We will add this later to just get the list of accounts, for now
+    // we comment it out so we can verify the full results 
+//    | project Account  
+);
+AnomAccounts
+
+
+// Next get a list of the average number of logins for the user account
+let fromDate = ago(5d);
+let thruDate = now();
+let baseData = materialize(
+    SecurityEvent
+    | where EventID == 4624  
+    | where AccountType == "User"
+    | make-series dcount(Computer) default=0 
+               on TimeGenerated in range(fromDate, thruDate, 1d) 
+               by Account 
+);
+// Calculate avg number of logins
+let AccountAvg = (
+    baseData
+      // For each row, calculate all of the stats using series_stats_dynamic
+      // then extract just the avg from that list. Convert that to a 
+      // double then add it as a new column, avg
+    | extend avg = todouble(series_stats_dynamic(dcount_Computer).avg ) 
+);
+AccountAvg
+
+
+// Now get the domain controllers
+let myDCs = toscalar(
+    ADAssessmentRecommendation
+    | summarize makeset(Computer)
+);
+print myDCs
+
+
+// For the computer name just got, get the domain accounts
+let myDCs = toscalar(
+    ADAssessmentRecommendation
+    | summarize makeset(Computer)
+);
+let myDAs = toscalar(
+    SecurityEvent
+    | where EventID in (4672, 576)
+    | where Computer in (myDCs)
+    | summarize makeset(Account)
+);
+print myDAs
+
+
+// Now put it all together
+let fromDate = ago(5d);
+let thruDate = now();
+let baseData = materialize(
+    SecurityEvent
+    | where EventID == 4624  // 4624 - An account was successfully logged on.
+    | where AccountType == "User"
+    | make-series dcount(Computer) default=0 
+               on TimeGenerated in range(fromDate, thruDate, 1d) 
+               by Account 
+);
+let AnomAccounts = (
+    baseData
+    | extend outliers = series_outliers(dcount_Computer) 
+    | mvexpand dcount_Computer, TimeGenerated, outliers to typeof(double)
+    | top 25 by outliers desc
+    | project Account 
+);
+let AccountAvg = (
+    baseData
+    | extend avg = todouble(series_stats_dynamic(dcount_Computer).avg ) 
+);
+let myDCs = toscalar(
+    ADAssessmentRecommendation
+    | summarize makeset(Computer)
+);
+let myDAs = toscalar(
+    SecurityEvent
+    | where EventID in (4672, 576)
+    | where Computer in (myDCs)
+    | summarize makeset(Account)
+);
+SecurityEvent
+  // 4624 - An account was successfully logged on.
+| where EventID  == 4624
+  // Where the account was in the list of anomolies
+| where Account in (AnomAccounts)
+  // Add a column to let us know if the accout is an admin
+| extend IsAdmin = iff(Account in (myDAs), "yes", "no")
+  // Get a distinct count of the computers by the account and
+  // whether the user was an admin
+| summarize CompCount = dcount(Computer) by Account, IsAdmin
+  // Now join this to the table of averages for that account
+| join kind=leftouter (
+   AccountAvg 
+) on Account
+  // Remove the columns we no longer need
+| project-away Account1, dcount_Computer, TimeGenerated        
+
+// Now we have a list of accounts, whether that account is an admin,
+// how many machines did they log into, and what is the average 
+// number of machines they usually login to
+
+
+//------------------------------------------------------------------------------
+// series_fir
+//------------------------------------------------------------------------------
+
+// FIR Is Finiite Impulse Repsonse time. It is typically used in digital 
+// signal processing, such as that used in radio (especially amateur radio). 
+
+// The finite indicates the array of values, if continued, would eventually
+// dwindle down to a zero value.
+
+// FIR analysis is a specialized discipline, however we can use FIR to assist
+// with other more common processing needs. 
+
+// Show a moving average of last 5 values
+range t from bin(now(), 1h)-23h to bin(now(), 1h) step 1h
+| summarize t=makelist(t)
+| project val=dynamic([10,20,30,40,5,6,7,8,0,10,20,40,100,40,20,10,20,9,7,20,80,10,5,1]), t
+| extend 5h_MovingAvg=series_fir(val, dynamic([1,1,1,1,1])),
+         5h_MovingAvg_centered=series_fir(val, dynamic([1,1,1,1,1]), true, true)
+| mvexpand val, t, 5h_MovingAvg, 5h_MovingAvg_centered         
+
+// Show difference between current value and previous value
+range t from bin(now(), 1h)-11h to bin(now(), 1h) step 1h
+| summarize t=makelist(t)
+| project t,value=dynamic([1,2,4,6,2,2,2,2,3,3,3,3])
+| extend diff=series_fir(value, dynamic([1,-1]), false, false)
+| mvexpand t, value, diff
+
+
+// Now to do something more useful. Get a list of High CPU Alerts for a 
+// computer, then for each alert calculate the time since the previous 
+// alert. Zero out the first row since that data would be misleading.
+let filterOutBigValues = (val:real)
+{
+  iif( val > 10000000, 0.0, val)
+};
+let convertToMinutes = (val:real)
+{
+  // 1 sec = 10000000 ns
+  round( (val / 10000000) / 60.0, 2)   
+};
+let convertMinToHours = (val:real)
+{
+  round(val / 60.0, 2)
+};
+Alert
+| where TimeGenerated >= ago(90d)
+| where AlertName == "High CPU Alert"
+| where Computer == "ContosoAzADDS1.ContosoRetail.com"
+| project Computer 
+        , TimeGenerated 
+| order by TimeGenerated asc
+| summarize tg=makelist(tolong(TimeGenerated)) by Computer
+| extend diff=series_fir(tg,  dynamic([1, -1]), false, false)
+| mvexpand tg, diff
+| extend TimeGenerated = todatetime(tg) 
+| extend diffInMinutes = convertToMinutes(diff)
+| extend diffInHours = convertMinToHours(diffInMinutes)
+| extend DifferenceInMinutes = filterOutBigValues(diffInMinutes)
+       , DifferenceInHours =  filterOutBigValues(diffInHours)  
+| project-away tg, diffInMinutes, diffInHours 
+
+
+//------------------------------------------------------------------------------
+// series_iir
+//------------------------------------------------------------------------------
+
+// Similar to FIR, IIR is Infinite Impulse Response. Like FIR, it is most
+// commonly used in signal processing. The major difference between FIR and IIR
+// is that the range of values is assumed to go on infinately, rather than 
+// than FIRs assumption it will be declining to zero 
+
+// Like FIR, IIR can be used for similar functions. 
+
+// Use IIR to calculate cumulative values
+range t from bin(now(), 1h)-23h to bin(now(), 1h) step 1h
+| summarize t=makelist(t)
+| project val=dynamic([10,20,30,40,5,6,7,8,0,10,20,40,100,40,20,10,20,9,7,20,80,10,5,1]), t
+| extend CumulativeTotal=series_iir(val, dynamic([1]), dynamic([1,-1])    )
+| mvexpand val, t, CumulativeTotal         
+
+
+// Here, we will determine the number of alerts for a computer on a given 
+// day, then accumulate them using series_iir
+Alert
+| where TimeGenerated >= ago(90d)
+| where AlertName == "High CPU Alert"
+| where Computer == "ContosoAzADDS1.ContosoRetail.com"
+| summarize AlertCount=count() by bin(TimeGenerated, 1d) 
+| order by TimeGenerated asc
+| summarize ac=makelist(AlertCount), tg=makelist(TimeGenerated)
+| extend CumulativeAlertCount = series_iir(ac,  dynamic([1]),  dynamic([1, -1]) )
+| mvexpand tg, ac, CumulativeAlertCount
+| extend AlertDate = format_datetime(todatetime(tg), 'yyyy-MM-dd') 
+| project AlertDate, DailyAlertCount = ac, CumulativeAlertCount 
+
+
+// With a slight variation to our query, we can now render this as a chart,
+// making it much easier to spot any spikes in alert counts
+Alert
+| where TimeGenerated >= ago(90d)
+| where AlertName == "High CPU Alert"
+| where Computer == "ContosoAzADDS1.ContosoRetail.com"
+| summarize AlertCount=count() by bin(TimeGenerated, 1d) 
+| order by TimeGenerated asc
+| summarize ac=makelist(AlertCount), tg=makelist(TimeGenerated)
+| extend CumulativeAlertCount = series_iir(ac,  dynamic([1]),  dynamic([1, -1]) )
+| mvexpand tg, ac, CumulativeAlertCount
+| extend AlertDate = todatetime(tg)
+       , CumulativeAlertCount = toint(CumulativeAlertCount) 
+| project AlertDate, CumulativeAlertCount
+| render timechart 
+
+//------------------------------------------------------------------------------
+// series_fit_line
+//------------------------------------------------------------------------------
+
+// series_fit_line performs a linear regression on a series. It returns
+// multiple values:
+// RSquare: Standard measure of the fit of quality, in a range of 0 to 1. 
+//          the closer to 1, the better the fit.
+// Slope:   Slope of the approximated line
+// Variance: The variance of the input data
+// RVariance: Residual variance (the variance between the input data)
+// Interception: Interception of the approcimated line
+// Line_Fit: Numericial array holding the values of the best fit line.
+//           Typically used for charting.
+range x from 1 to 1 step 1
+| project x = range(bin(now(), 1h)-11h, bin(now(), 1h), 1h)
+        , y = dynamic([2,5,6,8,11,15,17,18,25,26,30,30])
+| extend (RSquare,Slope,Variance,RVariance,Interception,LineFit) = series_fit_line(y)
+
+// Render this as charted data
+// y represents the actual value
+// LineFit represents the best fit "predicted" value
+range x from 1 to 1 step 1
+| project x=range(bin(now(), 1h)-11h, bin(now(), 1h), 1h)
+        , y=dynamic([2,5,6,8,11,15,17,18,25,26,30,30])
+| extend (RSquare,Slope,Variance,RVariance,Interception,LineFit) = series_fit_line(y)
+| render timechart
+
+
+// Let's render a chart based on the total memory (in kb) used per hour
+Perf
+| where TimeGenerated > ago(1d)
+| where CounterName == "Used Memory kBytes" 
+| where CounterValue > 0
+| make-series TotalMemoryUsed=sum(CounterValue) default=0 
+           on TimeGenerated 
+           in range(ago(1d), now(), 1h) 
+           by Computer
+| extend (RSquare,Slope,Variance,RVariance,Interception,LineFit)=series_fit_line(TotalMemoryUsed)
+| render timechart 
+
+
+//------------------------------------------------------------------------------
+// series_fit_2lines
+//------------------------------------------------------------------------------
+
+// series_fit_2lines takes the input data and splits the collection (it uses
+// the terms 'right side' and 'left side' to differentiate). It then
+// performs an anaylsis on each part of the data. The best split is the one
+// with the maximized RSquare. It will return the best values, but you
+// can also return the right and left side values if you want
+
+// Return all values
+range x from 1 to 1 step 1
+| project x = range(bin(now(), 1h)-11h, bin(now(), 1h), 1h)
+        , y = dynamic([2,5,6,8,11,15,17,18,25,26,30,30])
+| extend ( RSquare
+         , SplitIdx
+         , Variance
+         , ResidualVariance
+         , LineFit
+         , right_rsquare
+         , right_slope
+         , right_interception
+         , right_variance
+         , right_rvariance
+         , left_rsquare
+         , left_slope
+         , left_variance
+         , left_rvarience
+         ) = series_fit_2lines(y)
+
+// Return only the key values
+range x from 1 to 1 step 1
+| project x = range(bin(now(), 1h)-11h, bin(now(), 1h), 1h)
+        , y = dynamic([2,5,6,8,11,15,17,18,25,26,30,30])
+| extend ( RSquare
+         , SplitIdx
+         , Variance
+         , ResidualVariance
+         , LineFit
+         ) = series_fit_2lines(y)
+
+
+// Let's render a chart based on the total memory (in kb) used per hour
+Perf
+| where TimeGenerated > ago(1d)
+| where CounterName == "Used Memory kBytes" 
+| where CounterValue > 0
+| make-series TotalMemoryUsed=sum(CounterValue) default=0 
+           on TimeGenerated 
+           in range(ago(1d), now(), 1h) 
+           by Computer
+| extend (RSquare,SplitIdx,Variance,RVariance,LineFit)=series_fit_2lines(TotalMemoryUsed)
+| render timechart 
+
